@@ -40,31 +40,27 @@ fn bench_spsc(c: &mut Criterion) {
     group.sample_size(50);
 
     for cap in [64usize, 256, 1024, 4096] {
-        group.bench_with_input(
-            BenchmarkId::new("aligned_ring", cap),
-            &cap,
-            |b, &cap| {
-                b.iter(|| {
-                    let (tx, rx) = channel::<u64>(cap);
-                    let producer = thread::spawn(move || {
-                        let mut sent = 0u64;
-                        while sent < BATCH {
-                            if tx.try_send(black_box(sent)).is_ok() {
-                                sent += 1;
-                            }
-                        }
-                    });
-                    let mut received = 0u64;
-                    while received < BATCH {
-                        if let Some(v) = rx.try_recv() {
-                            black_box(v);
-                            received += 1;
+        group.bench_with_input(BenchmarkId::new("aligned_ring", cap), &cap, |b, &cap| {
+            b.iter(|| {
+                let (tx, rx) = channel::<u64>(cap);
+                let producer = thread::spawn(move || {
+                    let mut sent = 0u64;
+                    while sent < BATCH {
+                        if tx.try_send(black_box(sent)).is_ok() {
+                            sent += 1;
                         }
                     }
-                    producer.join().unwrap();
                 });
-            },
-        );
+                let mut received = 0u64;
+                while received < BATCH {
+                    if let Some(v) = rx.try_recv() {
+                        black_box(v);
+                        received += 1;
+                    }
+                }
+                producer.join().unwrap();
+            });
+        });
     }
 
     group.finish();
