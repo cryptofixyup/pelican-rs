@@ -20,19 +20,13 @@ pub mod wire {
     pub const MAGIC: u16 = 0x4153;
     pub const VERSION: u8 = 0x01;
 
-    const _: () = assert!(
-        core::mem::size_of::<VersionedTelemetryFrame>() == FRAME_SIZE
-    );
+    const _: () = assert!(core::mem::size_of::<VersionedTelemetryFrame>() == FRAME_SIZE);
 
-    const _: () = assert!(
-        core::mem::align_of::<VersionedTelemetryFrame>() == 8
-    );
+    const _: () = assert!(core::mem::align_of::<VersionedTelemetryFrame>() == 8);
 
     impl VersionedTelemetryFrame {
         #[inline]
-        pub fn decode_from_wire(
-            bytes: &[u8],
-        ) -> Result<Self, &'static str> {
+        pub fn decode_from_wire(bytes: &[u8]) -> Result<Self, &'static str> {
             if bytes.len() != FRAME_SIZE {
                 return Err("INVALID_FRAME_LENGTH");
             }
@@ -46,28 +40,22 @@ pub mod wire {
                 return Err("UNSUPPORTED_PROTOCOL_VERSION");
             }
 
-            let checksum =
-                u32::from_le_bytes([bytes[56], bytes[57], bytes[58], bytes[59]]);
+            let checksum = u32::from_le_bytes([bytes[56], bytes[57], bytes[58], bytes[59]]);
 
             let computed = crc32c::crc32c(&bytes[..HEADER_SIZE]);
             if computed != checksum {
                 return Err("CHECKSUM_MISMATCH");
             }
 
-            let sequence_id =
-                u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-            let timestamp_ns =
-                u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-            let device_id_hash =
-                u64::from_le_bytes(bytes[16..24].try_into().unwrap());
+            let sequence_id = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+            let timestamp_ns = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+            let device_id_hash = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
 
             let mut signal_metrics = [0.0_f32; 6];
             let mut i = 0;
             while i < 6 {
                 let offset = 24 + i * 4;
-                let bits = u32::from_le_bytes(
-                    bytes[offset..offset + 4].try_into().unwrap()
-                );
+                let bits = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
                 let value = f32::from_bits(bits);
                 if !value.is_finite() {
                     return Err("INVALID_METRIC_VALUE");
@@ -76,17 +64,13 @@ pub mod wire {
                 i += 1;
             }
 
-            let anomaly_score = f32::from_bits(
-                u32::from_le_bytes(bytes[48..52].try_into().unwrap())
-            );
-            if !anomaly_score.is_finite()
-                || !(0.0..=1.0).contains(&anomaly_score)
-            {
+            let anomaly_score =
+                f32::from_bits(u32::from_le_bytes(bytes[48..52].try_into().unwrap()));
+            if !anomaly_score.is_finite() || !(0.0..=1.0).contains(&anomaly_score) {
                 return Err("INVALID_ANOMALY_SCORE");
             }
 
-            let nonce =
-                u32::from_le_bytes(bytes[52..56].try_into().unwrap());
+            let nonce = u32::from_le_bytes(bytes[52..56].try_into().unwrap());
 
             Ok(Self {
                 sequence_id,

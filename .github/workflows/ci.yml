@@ -21,3 +21,6 @@ jobs:
 
       - name: Cargo test
         run: cargo test --workspace --all-targets
+
+      - name: Compile-fail API tests
+        run: cargo test --workspace --doc

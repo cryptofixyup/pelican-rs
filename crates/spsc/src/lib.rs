@@ -5,7 +5,7 @@
 //! Producer owns slots from `head` forward (up to `head + capacity`).
 //! Consumer owns slots from `tail` forward.
 //!
-//! - Producer: `Relaxed` load of tail to check space; `Release` store of head after writing slot.
+//! - Producer: `Acquire` load of tail to check space; `Release` store of head after writing slot.
 //! - Consumer: `Acquire` load of head to observe published slot; `Release` store of tail after reading.
 //!
 //! The `Release`/`Acquire` pair on `head` is the happens-before edge that makes the slot
@@ -25,7 +25,8 @@
 //! Causal attribution requires raw PMU hardware counter comparison (aligned vs. unaligned
 //! builds) under controlled thread affinity. See `benches/throughput.rs`.
 
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
+use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -67,14 +68,45 @@ struct Inner<T> {
 unsafe impl<T: Send> Send for Inner<T> {}
 unsafe impl<T: Send> Sync for Inner<T> {}
 
+impl<T> Drop for Inner<T> {
+    fn drop(&mut self) {
+        // The last Arc is gone, so neither endpoint can access slots anymore.
+        let mut tail = *self.tail.0.get_mut();
+        let head = *self.head.0.get_mut();
+        while tail != head {
+            let slot = &mut self.slots[tail & self.mask];
+            // SAFETY: precisely the slots in [tail, head) are initialized; received
+            // values already advanced tail and must not be dropped again.
+            unsafe { slot.value.get_mut().assume_init_drop() };
+            tail = tail.wrapping_add(1);
+        }
+    }
+}
+
 /// Producer handle. Not `Clone` — only one producer is permitted.
+///
+/// A handle can move between threads, but cannot be shared between them.
+///
+/// ```compile_fail
+/// fn assert_sync<T: Sync>() {}
+/// assert_sync::<spsc::Producer<u64>>();
+/// ```
 pub struct Producer<T> {
     inner: Arc<Inner<T>>,
+    // Cell is Send but not Sync: shared references must not create multiple writers.
+    _not_sync: PhantomData<Cell<()>>,
 }
 
 /// Consumer handle. Not `Clone` — only one consumer is permitted.
+///
+/// ```compile_fail
+/// fn assert_sync<T: Sync>() {}
+/// assert_sync::<spsc::Consumer<u64>>();
+/// ```
 pub struct Consumer<T> {
     inner: Arc<Inner<T>>,
+    // Shared references must not create multiple readers of an initialized slot.
+    _not_sync: PhantomData<Cell<()>>,
 }
 
 /// Create a bounded SPSC queue with capacity rounded up to the next power of two.
@@ -83,6 +115,10 @@ pub struct Consumer<T> {
 /// Panics if `capacity` is zero or greater than `usize::MAX / 2`.
 pub fn channel<T>(capacity: usize) -> (Producer<T>, Consumer<T>) {
     assert!(capacity > 0, "capacity must be > 0");
+    assert!(
+        capacity <= usize::MAX / 2,
+        "capacity must be <= usize::MAX / 2"
+    );
     let cap = capacity.next_power_of_two();
     let mut slots = Vec::with_capacity(cap);
     for _ in 0..cap {
@@ -95,8 +131,14 @@ pub fn channel<T>(capacity: usize) -> (Producer<T>, Consumer<T>) {
         mask: cap - 1,
     });
     (
-        Producer { inner: Arc::clone(&inner) },
-        Consumer { inner },
+        Producer {
+            inner: Arc::clone(&inner),
+            _not_sync: PhantomData,
+        },
+        Consumer {
+            inner,
+            _not_sync: PhantomData,
+        },
     )
 }
 
@@ -148,6 +190,48 @@ impl<T> Consumer<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_values_are_dropped_once_when_last_handle_is_dropped() {
+        struct Tracked(Arc<AtomicUsize>);
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = channel(2);
+        assert!(tx.try_send(Tracked(dropped.clone())).is_ok());
+        assert!(tx.try_send(Tracked(dropped.clone())).is_ok());
+        drop(rx.try_recv());
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        assert!(tx.try_send(Tracked(dropped.clone())).is_ok());
+        drop(tx);
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        drop(rx);
+        assert_eq!(dropped.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "capacity must be <= usize::MAX / 2")]
+    fn oversized_capacity_panics_before_rounding() {
+        let _ = channel::<u8>(usize::MAX);
+    }
+
+    #[test]
+    fn indices_wrap_without_losing_values() {
+        let (tx, rx) = channel(2);
+        tx.inner.head.0.store(usize::MAX, Ordering::Relaxed);
+        tx.inner.tail.0.store(usize::MAX, Ordering::Relaxed);
+        tx.try_send(1).unwrap();
+        tx.try_send(2).unwrap();
+        assert_eq!(tx.try_send(3), Err(3));
+        assert_eq!(rx.try_recv(), Some(1));
+        assert_eq!(rx.try_recv(), Some(2));
+        assert_eq!(rx.try_recv(), None);
+        tx.try_send(3).unwrap();
+        assert_eq!(rx.try_recv(), Some(3));
+    }
 
     #[test]
     fn test_ring_slot_cache_line_size() {
