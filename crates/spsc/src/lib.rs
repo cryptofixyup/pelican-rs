@@ -115,6 +115,10 @@ pub struct Consumer<T> {
 /// Panics if `capacity` is zero or greater than `usize::MAX / 2`.
 pub fn channel<T>(capacity: usize) -> (Producer<T>, Consumer<T>) {
     assert!(capacity > 0, "capacity must be > 0");
+    assert!(
+        capacity <= usize::MAX / 2,
+        "capacity must be <= usize::MAX / 2"
+    );
     let cap = capacity.next_power_of_two();
     let mut slots = Vec::with_capacity(cap);
     for _ in 0..cap {
@@ -206,6 +210,12 @@ mod tests {
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
         drop(rx);
         assert_eq!(dropped.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "capacity must be <= usize::MAX / 2")]
+    fn oversized_capacity_panics_before_rounding() {
+        let _ = channel::<u8>(usize::MAX);
     }
 
     #[test]
